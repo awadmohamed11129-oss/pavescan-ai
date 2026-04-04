@@ -7,7 +7,18 @@ import numpy as np
 from ultralytics import YOLO
 
 
-DEFAULT_MODEL = "yolov8n-seg.pt"
+# Where trained models live
+MODELS_DIR = Path(__file__).resolve().parent.parent.parent / "models"
+
+# Custom-trained model names (checked in order)
+CUSTOM_MODELS = [
+    "pavescan_rdd2022.pt",    # 4-class detection (longitudinal, transverse, alligator, pothole)
+    "pavescan_crack_seg.pt",  # 1-class segmentation (crack)
+]
+
+# Fallback: pretrained COCO model (detects generic objects, not cracks)
+FALLBACK_MODEL = "yolov8n-seg.pt"
+
 CONFIDENCE_THRESHOLD = 0.25
 
 # Crack severity classification based on detection confidence and area
@@ -19,15 +30,32 @@ SEVERITY_THRESHOLDS = {
 
 
 def load_model(model_path: str | None = None) -> YOLO:
-    """Load a YOLOv8 segmentation model.
+    """Load a YOLOv8 model for crack detection.
+
+    Searches for models in this order:
+    1. Explicit model_path (if provided)
+    2. Custom-trained models in models/ directory
+    3. Fallback pretrained model
 
     Args:
-        model_path: Path to a custom-trained .pt file.
-                    If None, loads the default pretrained model.
+        model_path: Path to a specific .pt file. If None, auto-detects.
     """
     if model_path and Path(model_path).exists():
         return YOLO(model_path)
-    return YOLO(DEFAULT_MODEL)
+
+    # Search for custom-trained models
+    for name in CUSTOM_MODELS:
+        path = MODELS_DIR / name
+        if path.exists():
+            return YOLO(str(path))
+
+    # Fallback: check if pretrained model is in models/ dir
+    fallback_path = MODELS_DIR / FALLBACK_MODEL
+    if fallback_path.exists():
+        return YOLO(str(fallback_path))
+
+    # Last resort: download pretrained model
+    return YOLO(FALLBACK_MODEL)
 
 
 def run_inference(
