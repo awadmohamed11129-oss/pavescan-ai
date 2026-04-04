@@ -11,7 +11,14 @@ import streamlit as st
 project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.detection.model import load_model, run_inference, summarize_detections
+from src.detection.model import (
+    list_available_models,
+    load_ensemble_models,
+    load_model,
+    run_ensemble_inference,
+    run_inference,
+    summarize_detections,
+)
 
 st.set_page_config(page_title="Detection | PaveScan AI", layout="wide")
 st.title("AI Crack Detection")
@@ -19,20 +26,51 @@ st.title("AI Crack Detection")
 # Sidebar controls
 with st.sidebar:
     st.header("Detection Settings")
-    confidence = st.slider(
-        "Confidence Threshold",
-        min_value=0.1,
-        max_value=0.9,
-        value=0.25,
-        step=0.05,
-        help="Minimum confidence for a detection to be shown. Lower = more detections (possibly noisy).",
+
+    # Model mode selector
+    mode = st.radio(
+        "Detection Mode",
+        options=["Ensemble (Both Models)", "Single Model"],
+        index=0,
+        help="Ensemble runs both models and merges results for best coverage. Single uses one model.",
     )
 
-    model_path = st.text_input(
-        "Custom Model Path (optional)",
-        placeholder="models/best.pt",
-        help="Path to a custom-trained YOLOv8 .pt file. Leave blank for default.",
+    available_models = list_available_models()
+    model_names = [m["name"] for m in available_models]
+
+    selected_model_path = None
+    if mode == "Single Model" and model_names:
+        selected_name = st.selectbox(
+            "Select Model",
+            options=model_names,
+            index=0,
+            help="Choose which model to run.",
+        )
+        selected_model_path = next(
+            m["path"] for m in available_models if m["name"] == selected_name
+        )
+        info = next(m for m in available_models if m["name"] == selected_name)
+        st.caption(
+            f"**Type:** {info['task']}  \n"
+            f"**Classes ({info['num_classes']}):** {', '.join(info['classes'])}"
+        )
+
+    confidence = st.slider(
+        "Confidence Threshold",
+        min_value=0.05,
+        max_value=0.9,
+        value=0.15,
+        step=0.05,
+        help="Lower = more detections (possibly noisy). Higher = fewer but more certain.",
     )
+
+    # Show ensemble info
+    if mode == "Ensemble (Both Models)":
+        ensemble_models = [m for m in available_models if m["name"] != "yolov8n-seg"]
+        if ensemble_models:
+            st.markdown("**Ensemble models:**")
+            for m in ensemble_models:
+                st.caption(f"- {m['name']} ({m['task']}, {m['num_classes']} classes)")
 
 # Check for uploaded images
 uploaded_files = st.session_state.get("uploaded_files", [])
@@ -42,28 +80,39 @@ if not uploaded_files:
     st.page_link("pages/1_Upload.py", label="Go to Upload", icon="📤")
     st.stop()
 
-# Load model
-with st.spinner("Loading YOLOv8 model..."):
-    model = load_model(model_path if model_path else None)
-st.success("Model loaded")
+# Load model(s)
+with st.spinner("Loading model(s)..."):
+    if mode == "Ensemble (Both Models)":
+        ensemble = load_ensemble_models()
+        if not ensemble:
+            st.error("No custom models found in models/ directory.")
+            st.stop()
+        st.success(f"Ensemble loaded: {', '.join(ensemble.keys())}")
+    else:
+        model = load_model(selected_model_path)
+        st.success("Model loaded")
 
 # Run detection button
 if st.button("Run Detection on All Images", type="primary"):
-    all_detections = []
+    all_results = []
+    total_per_model = {}
 
     progress = st.progress(0, text="Running detection...")
 
     for i, file in enumerate(uploaded_files):
-        # Read image
         file_bytes = np.frombuffer(file.read(), dtype=np.uint8)
         file.seek(0)
         image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
-        # Run inference
-        result = run_inference(model, image, confidence=confidence)
+        if mode == "Ensemble (Both Models)":
+            result = run_ensemble_inference(ensemble, image, confidence=confidence)
+            # Accumulate per-model counts
+            for name, count in result.get("per_model_counts", {}).items():
+                total_per_model[name] = total_per_model.get(name, 0) + count
+        else:
+            result = run_inference(model, image, confidence=confidence)
 
-        # Store results
-        all_detections.append({
+        all_results.append({
             "filename": file.name,
             "result": result,
         })
@@ -73,19 +122,26 @@ if st.button("Run Detection on All Images", type="primary"):
             text=f"Processing {file.name}... ({i + 1}/{len(uploaded_files)})",
         )
 
-    # Save to session state
-    st.session_state["detection_results"] = all_detections
+    st.session_state["detection_results"] = all_results
     progress.empty()
-    st.success(f"Detection complete on {len(uploaded_files)} image(s)")
+
+    # Show ensemble stats
+    total_merged = sum(len(r["result"]["detections"]) for r in all_results)
+    if mode == "Ensemble (Both Models)" and total_per_model:
+        raw_total = sum(total_per_model.values())
+        model_breakdown = ", ".join(f"{n}: {c}" for n, c in total_per_model.items())
+        st.success(
+            f"Detection complete — {model_breakdown} | "
+            f"After dedup: **{total_merged}** unique detections"
+        )
+    else:
+        st.success(f"Detection complete — {total_merged} detections across {len(uploaded_files)} image(s)")
 
 # Display results
 if "detection_results" in st.session_state:
     results = st.session_state["detection_results"]
 
     # Summary metrics
-    total_dets = sum(
-        len(r["result"]["detections"]) for r in results
-    )
     all_dets = [d for r in results for d in r["result"]["detections"]]
     summary = summarize_detections(all_dets)
 
@@ -135,7 +191,7 @@ if "detection_results" in st.session_state:
             st.image(annotated_rgb, use_container_width=True)
 
             if item["result"]["detections"]:
-                for j, det in enumerate(item["result"]["detections"]):
+                for det in item["result"]["detections"]:
                     severity_emoji = {"low": "🟢", "medium": "🟡", "high": "🔴"}
                     st.markdown(
                         f"{severity_emoji[det['severity']]} "
