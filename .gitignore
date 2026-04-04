@@ -1,0 +1,34 @@
+# Large data files
+data/raw/
+data/processed/
+data/results/
+*.tif
+*.tiff
+
+# Model weights (too large for git)
+models/*.pt
+models/*.onnx
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Runs and logs
+runs/
+*.log

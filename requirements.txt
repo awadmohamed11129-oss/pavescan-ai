@@ -1,0 +1,30 @@
+# AI / Computer Vision
+ultralytics>=8.1.0
+torch>=2.0
+opencv-python>=4.8
+Pillow>=10.0
+
+# Geospatial
+rasterio>=1.3
+geopandas>=0.14
+shapely>=2.0
+pyproj>=3.6
+folium>=0.15
+
+# Dashboard
+streamlit>=1.30
+streamlit-folium>=0.17
+pydeck>=0.8
+plotly>=5.18
+
+# Report Generation
+weasyprint>=60
+Jinja2>=3.1
+
+# Data Processing
+pandas>=2.1
+numpy>=1.24
+
+# Utilities
+tqdm>=4.66
+python-dotenv>=1.0
