@@ -1,0 +1,21 @@
+{
+  "version": "v1",
+  "model": "pavescan_crack_seg.pt",
+  "architecture": "YOLOv8n-seg",
+  "parameters": "3.26M",
+  "training_imgsz": 640,
+  "training_epochs": 50,
+  "dataset": "Crack-Seg",
+  "val_set_size": 200,
+  "val_instances": 249,
+  "v1_val_box_mAP50": 0.818,
+  "v1_val_box_mAP50_95": 0.636,
+  "v1_val_seg_mAP50": 0.658,
+  "v1_val_seg_mAP50_95": 0.226,
+  "v1_val_box_precision": 0.861,
+  "v1_val_box_recall": 0.744,
+  "v1_val_seg_precision": 0.773,
+  "v1_val_seg_recall": 0.663,
+  "device_evaluated_on": "CPU AMD Ryzen 5 3600",
+  "_note": "Generated locally on 2026-04-30 using ultralytics 8.4.36; default conf threshold."
+}
