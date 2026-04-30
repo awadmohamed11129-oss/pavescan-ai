@@ -24,6 +24,13 @@ SEVERITY_COLORS = {
     "high": "#FF1744",
 }
 
+PRIORITY_COLORS = {
+    "critical": "#FF1744",
+    "urgent": "#FF9100",
+    "monitor": "#FFC400",
+    "routine": "#00C853",
+}
+
 
 def _dms_to_decimal(dms: tuple, ref: str) -> float:
     """Convert GPS coordinates from degrees/minutes/seconds to decimal degrees.
@@ -233,9 +240,14 @@ def build_marker_data(geo_results: list[dict]) -> list[dict]:
                     "lon": lon + offset_lon,
                     "class_name": det["class_name"],
                     "confidence": det["confidence"],
-                    "severity": det["severity"],
+                    "severity": det.get("severity", "low"),
                     "filename": filename,
                     "area_pixels": det.get("area_pixels", 0),
+                    "safety_priority": det.get("safety_priority", "routine"),
+                    "recommended_action": det.get("recommended_action", ""),
+                    "severity_score": det.get("severity_score", 0.0),
+                    "width_pixels": det.get("width_pixels", 0.0),
+                    "deterioration_risk": det.get("deterioration_risk", {}),
                 })
 
     return markers

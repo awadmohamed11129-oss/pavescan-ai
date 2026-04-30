@@ -1,4 +1,4 @@
-"""Map page — interactive map with severity markers and heatmap overlay."""
+"""Map page — interactive map with priority-colored markers and heatmap overlay."""
 
 import sys
 from pathlib import Path
@@ -12,8 +12,10 @@ from streamlit_folium import st_folium
 project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(project_root))
 
+from src.detection.model import SAFETY_PRIORITIES
 from src.mapping.geo import (
     DEMO_CENTER,
+    PRIORITY_COLORS,
     SEVERITY_COLORS,
     assign_coordinates_to_results,
     build_marker_data,
@@ -35,6 +37,13 @@ with st.sidebar:
         default=["low", "medium", "high"],
     )
 
+    priority_filter = st.multiselect(
+        "Filter by Priority",
+        options=["critical", "urgent", "monitor", "routine"],
+        default=["critical", "urgent", "monitor", "routine"],
+        format_func=lambda x: SAFETY_PRIORITIES[x]["label"],
+    )
+
     tile_choice = st.selectbox(
         "Map Style",
         options=["Street", "Satellite", "Topo"],
@@ -42,7 +51,19 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.markdown("### Legend")
+    st.markdown("### Priority Legend")
+    for key in ["critical", "urgent", "monitor", "routine"]:
+        color = PRIORITY_COLORS[key]
+        label = SAFETY_PRIORITIES[key]["label"]
+        timeline = SAFETY_PRIORITIES[key]["timeline"]
+        st.markdown(
+            f'<span style="color:{color}; font-size:1.4em;">&#9679;</span> '
+            f'**{label}** — {timeline}',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("---")
+    st.markdown("### Severity Legend")
     st.markdown(
         f'<span style="color:{SEVERITY_COLORS["high"]}">&#9679;</span> High Severity',
         unsafe_allow_html=True,
@@ -72,7 +93,7 @@ TILE_OPTIONS = {
 # --- Guard: need detection results first ---
 if "detection_results" not in st.session_state or not st.session_state["detection_results"]:
     st.warning("No detection results found. Run detection first.")
-    st.page_link("pages/2_Detection.py", label="Go to Detection", icon="🔍")
+    st.page_link("pages/2_Detection.py", label="Go to Detection", icon="\U0001f50d")
     st.stop()
 
 detection_results = st.session_state["detection_results"]
@@ -91,30 +112,31 @@ if is_demo:
 # --- Build map data ---
 all_markers = build_marker_data(geo_results)
 
-# Apply severity filter
-markers = [m for m in all_markers if m["severity"] in severity_filter]
+# Apply severity + priority filters
+markers = [
+    m for m in all_markers
+    if m["severity"] in severity_filter
+    and m.get("safety_priority", "routine") in priority_filter
+]
 
 # --- Summary metrics ---
+st.subheader("Summary")
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Total Defects", len(all_markers))
-col2.metric(
-    "High Severity",
-    len([m for m in all_markers if m["severity"] == "high"]),
-)
-col3.metric(
-    "Medium Severity",
-    len([m for m in all_markers if m["severity"] == "medium"]),
-)
-col4.metric(
-    "Low Severity",
-    len([m for m in all_markers if m["severity"] == "low"]),
-)
+
+# Priority counts
+critical_count = len([m for m in all_markers if m.get("safety_priority") == "critical"])
+urgent_count = len([m for m in all_markers if m.get("safety_priority") == "urgent"])
+monitor_count = len([m for m in all_markers if m.get("safety_priority") == "monitor"])
+
+col2.metric("Critical", critical_count)
+col3.metric("Urgent", urgent_count)
+col4.metric("Monitor / Routine", monitor_count + len(all_markers) - critical_count - urgent_count - monitor_count)
 
 st.markdown("---")
 
 # --- Build Folium map ---
 if markers:
-    # Center on the mean of all marker positions
     center_lat = sum(m["lat"] for m in markers) / len(markers)
     center_lon = sum(m["lon"] for m in markers) / len(markers)
 else:
@@ -127,29 +149,48 @@ m = folium.Map(
     **tile_config,
 )
 
-# Add severity-colored circle markers with popups
+# Marker sizing by priority: critical = largest and most visible
+PRIORITY_RADIUS = {"critical": 14, "urgent": 10, "monitor": 6, "routine": 4}
+
+# Add priority-colored circle markers with enriched popups
 for marker in markers:
-    color = SEVERITY_COLORS.get(marker["severity"], "#888888")
+    priority_key = marker.get("safety_priority", "routine")
+    color = PRIORITY_COLORS.get(priority_key, "#888888")
+    radius = PRIORITY_RADIUS.get(priority_key, 6)
+    priority_label = SAFETY_PRIORITIES.get(priority_key, {}).get("label", "ROUTINE")
+    severity = marker.get("severity", "low")
+    action = marker.get("recommended_action", "")
+    deterioration = marker.get("deterioration_risk", {})
+    deterioration_warning = deterioration.get("warning", "")
 
     popup_html = f"""
-    <div style="font-family: Arial, sans-serif; min-width: 180px;">
+    <div style="font-family: Arial, sans-serif; min-width: 200px;">
         <b style="font-size: 14px;">{marker["class_name"]}</b><br>
+        <span style="background:{color};color:white;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:0.85em;">
+            {priority_label}
+        </span><br><br>
         <b>Confidence:</b> {marker["confidence"]:.1%}<br>
-        <b>Severity:</b> <span style="color:{color}; font-weight:bold;">{marker["severity"].upper()}</span><br>
+        <b>Severity:</b> {severity.upper()} ({marker.get("severity_score", 0):.2f})<br>
         <b>File:</b> {marker["filename"]}<br>
-        <b>Area:</b> {marker["area_pixels"]:,} px
-    </div>
+        <b>Area:</b> {marker["area_pixels"]:,} px<br>
     """
+    if marker.get("width_pixels", 0) > 0:
+        popup_html += f"<b>Width:</b> {marker['width_pixels']:.0f} px<br>"
+    if action:
+        popup_html += f"<br><b>Action:</b> {action}<br>"
+    if deterioration_warning:
+        popup_html += f"<b>Risk:</b> {deterioration_warning}<br>"
+    popup_html += "</div>"
 
     folium.CircleMarker(
         location=[marker["lat"], marker["lon"]],
-        radius=8 if marker["severity"] == "high" else 6 if marker["severity"] == "medium" else 4,
+        radius=radius,
         color=color,
         fill=True,
         fill_color=color,
         fill_opacity=0.7,
-        popup=folium.Popup(popup_html, max_width=250),
-        tooltip=f"{marker['class_name']} ({marker['severity']})",
+        popup=folium.Popup(popup_html, max_width=280),
+        tooltip=f"{marker['class_name']} [{priority_label}]",
     ).add_to(m)
 
 # Optional heatmap layer
@@ -164,7 +205,7 @@ if show_heatmap and markers:
             gradient={0.2: "blue", 0.4: "lime", 0.6: "yellow", 0.8: "orange", 1.0: "red"},
         ).add_to(m)
 
-# Render the map (returned_objects=[] prevents rerun loops / flickering)
+# Render the map
 st_folium(m, height=600, use_container_width=True, returned_objects=[])
 
 # --- Defect inventory table ---
@@ -174,21 +215,24 @@ st.subheader("Defect Inventory")
 if markers:
     df = pd.DataFrame([
         {
-            "File": m["filename"],
-            "Defect Type": m["class_name"],
-            "Confidence": f"{m['confidence']:.1%}",
-            "Severity": m["severity"].upper(),
-            "Latitude": f"{m['lat']:.6f}",
-            "Longitude": f"{m['lon']:.6f}",
-            "Area (px)": m["area_pixels"],
+            "File": mk["filename"],
+            "Defect Type": mk["class_name"],
+            "Priority": SAFETY_PRIORITIES.get(mk.get("safety_priority", "routine"), {}).get("label", "ROUTINE"),
+            "Confidence": f"{mk['confidence']:.1%}",
+            "Severity": mk["severity"].upper(),
+            "Score": f"{mk.get('severity_score', 0):.2f}",
+            "Width (px)": f"{mk.get('width_pixels', 0):.0f}" if mk.get("width_pixels", 0) > 0 else "-",
+            "Latitude": f"{mk['lat']:.6f}",
+            "Longitude": f"{mk['lon']:.6f}",
+            "Area (px)": mk["area_pixels"],
         }
-        for m in markers
+        for mk in markers
     ])
     st.dataframe(df, use_container_width=True, hide_index=True)
 else:
-    st.info("No defects match the current severity filter.")
+    st.info("No defects match the current filters.")
 
 # --- Navigation footer ---
 st.markdown("---")
 st.info("Next step: Generate an inspection **Report** with all findings.")
-st.page_link("pages/4_Report.py", label="Go to Report", icon="📄")
+st.page_link("pages/4_Report.py", label="Go to Report", icon="\U0001f4c4")

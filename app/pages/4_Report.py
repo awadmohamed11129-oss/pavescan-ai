@@ -9,7 +9,7 @@ import streamlit as st
 project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.detection.model import summarize_detections
+from src.detection.model import SAFETY_PRIORITIES, summarize_detections
 from src.mapping.geo import assign_coordinates_to_results
 from src.reporting.generator import (
     compute_pci_score,
@@ -82,6 +82,30 @@ with col_stats:
     c2.metric("High Severity", summary["by_severity"]["high"])
     c3.metric("Medium Severity", summary["by_severity"]["medium"])
     c4.metric("Low Severity", summary["by_severity"]["low"])
+
+    # Safety priority metrics
+    by_priority = summary.get("by_priority", {})
+    p1, p2, p3, p4 = st.columns(4)
+    p1.markdown(
+        f"<div style='text-align:center;padding:6px;background:#FF1744;color:white;border-radius:6px;'>"
+        f"<b style='font-size:0.75em;'>CRITICAL</b><br><span style='font-size:1.5em;'>{by_priority.get('critical', 0)}</span></div>",
+        unsafe_allow_html=True,
+    )
+    p2.markdown(
+        f"<div style='text-align:center;padding:6px;background:#FF9100;color:white;border-radius:6px;'>"
+        f"<b style='font-size:0.75em;'>URGENT</b><br><span style='font-size:1.5em;'>{by_priority.get('urgent', 0)}</span></div>",
+        unsafe_allow_html=True,
+    )
+    p3.markdown(
+        f"<div style='text-align:center;padding:6px;background:#FFC400;color:#333;border-radius:6px;'>"
+        f"<b style='font-size:0.75em;'>MONITOR</b><br><span style='font-size:1.5em;'>{by_priority.get('monitor', 0)}</span></div>",
+        unsafe_allow_html=True,
+    )
+    p4.markdown(
+        f"<div style='text-align:center;padding:6px;background:#00C853;color:white;border-radius:6px;'>"
+        f"<b style='font-size:0.75em;'>ROUTINE</b><br><span style='font-size:1.5em;'>{by_priority.get('routine', 0)}</span></div>",
+        unsafe_allow_html=True,
+    )
 
     if summary["total_detections"] > 0:
         st.markdown(f"**Average Confidence:** {summary['avg_confidence']:.1%}")

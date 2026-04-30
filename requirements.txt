@@ -1,8 +1,9 @@
 # AI / Computer Vision
-ultralytics>=8.1.0
+ultralytics>=8.3.0
 torch>=2.0
 opencv-python>=4.8
 Pillow>=10.0
+sahi>=0.11.18
 
 # Geospatial
 rasterio>=1.3

@@ -32,3 +32,6 @@ Thumbs.db
 # Runs and logs
 runs/
 *.log
+
+# Generated reports (produced by app + smoke tests)
+reports/
