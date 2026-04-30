@@ -30,6 +30,11 @@ CONFIDENCE_THRESHOLD = 0.15
 # IoU threshold for deduplication in ensemble mode
 IOU_THRESHOLD = 0.5
 
+# Weighted Box Fusion settings (alternative ensemble fusion method)
+WBF_IOU_THRESHOLD = 0.55              # Standard for object-detection ensembles
+WBF_SKIP_BOX_THRESHOLD = 0.0          # Already pre-filtered by confidence
+WBF_LABEL_HARMONIZE_IOU = 0.5         # IoU above which generic "crack" is relabelled
+
 # Default inference settings
 DEFAULT_IMGSZ = 1280
 DEFAULT_SAHI_SLICE_SIZE = 640
@@ -726,6 +731,149 @@ def deduplicate_detections(all_detections: list[dict]) -> list[dict]:
     return keep
 
 
+def _harmonize_class_labels(
+    detections_by_model: dict[str, list[dict]],
+    iou_threshold: float = WBF_LABEL_HARMONIZE_IOU,
+) -> dict[str, list[dict]]:
+    """Relabel generic 'crack' detections to a specific class when they overlap one.
+
+    Without this, WBF can't fuse a seg-model 'crack' detection with the same
+    physical defect from the detection model labelled 'Pothole' — they have
+    different label IDs in WBF's eyes and stay as two separate detections.
+    The IoU-dedup path handles this implicitly by preferring specific names.
+    """
+    specific_dets = [
+        d for dets in detections_by_model.values()
+        for d in dets if d["class_name"].lower() != "crack"
+    ]
+    if not specific_dets:
+        return detections_by_model
+
+    harmonized: dict[str, list[dict]] = {}
+    for model_name, dets in detections_by_model.items():
+        new_dets = []
+        for d in dets:
+            new_d = dict(d)
+            if new_d["class_name"].lower() == "crack":
+                best_iou = 0.0
+                best_specific = None
+                for s in specific_dets:
+                    iou = compute_iou(new_d["bbox"], s["bbox"])
+                    if iou > best_iou and iou > iou_threshold:
+                        best_iou = iou
+                        best_specific = s
+                if best_specific is not None:
+                    new_d["class_name"] = best_specific["class_name"]
+            new_dets.append(new_d)
+        harmonized[model_name] = new_dets
+    return harmonized
+
+
+def fuse_detections_wbf(
+    detections_by_model: dict[str, list[dict]],
+    image_shape: tuple,
+    iou_threshold: float = WBF_IOU_THRESHOLD,
+) -> list[dict]:
+    """Merge cross-model detections using Weighted Box Fusion.
+
+    WBF averages overlapping boxes weighted by confidence rather than dropping
+    the loser like IoU-dedup. Typically yields +1-3 mAP on multi-model ensembles
+    when both models partially see the same defect.
+
+    Masks aren't preserved by WBF itself — we recover the closest-IoU original
+    mask so downstream width estimation and area computation still work.
+    """
+    from ensemble_boxes import weighted_boxes_fusion
+
+    H, W = image_shape[:2]
+    if H == 0 or W == 0:
+        return []
+
+    detections_by_model = _harmonize_class_labels(detections_by_model)
+
+    all_class_names: set[str] = set()
+    for dets in detections_by_model.values():
+        for d in dets:
+            all_class_names.add(d["class_name"])
+    if not all_class_names:
+        return []
+
+    class_to_id = {name: i for i, name in enumerate(sorted(all_class_names))}
+    id_to_class = {i: name for name, i in class_to_id.items()}
+
+    boxes_list: list[list[list[float]]] = []
+    scores_list: list[list[float]] = []
+    labels_list: list[list[int]] = []
+    flat_originals: list[dict] = []
+
+    for model_name in detections_by_model:
+        dets = detections_by_model[model_name]
+        boxes: list[list[float]] = []
+        scores: list[float] = []
+        labels: list[int] = []
+        for d in dets:
+            x1, y1, x2, y2 = d["bbox"]
+            nx1 = max(0.0, min(1.0, x1 / W))
+            ny1 = max(0.0, min(1.0, y1 / H))
+            nx2 = max(0.0, min(1.0, x2 / W))
+            ny2 = max(0.0, min(1.0, y2 / H))
+            if nx2 <= nx1 or ny2 <= ny1:
+                continue  # degenerate box, skip
+            boxes.append([nx1, ny1, nx2, ny2])
+            scores.append(float(d["confidence"]))
+            labels.append(class_to_id[d["class_name"]])
+            flat_originals.append(d)
+        boxes_list.append(boxes)
+        scores_list.append(scores)
+        labels_list.append(labels)
+
+    if not any(boxes_list):
+        return []
+
+    fused_boxes, fused_scores, fused_labels = weighted_boxes_fusion(
+        boxes_list,
+        scores_list,
+        labels_list,
+        weights=None,
+        iou_thr=iou_threshold,
+        skip_box_thr=WBF_SKIP_BOX_THRESHOLD,
+        conf_type="avg",
+    )
+
+    merged: list[dict] = []
+    for fb, fs, fl in zip(fused_boxes, fused_scores, fused_labels):
+        bbox = [float(fb[0]) * W, float(fb[1]) * H, float(fb[2]) * W, float(fb[3]) * H]
+        class_name = id_to_class[int(fl)]
+
+        # Recover mask + area from the closest original detection of the same class
+        best_match = None
+        best_iou = 0.0
+        for orig in flat_originals:
+            if orig["class_name"] != class_name:
+                continue
+            iou = compute_iou(bbox, orig["bbox"])
+            if iou > best_iou:
+                best_iou = iou
+                best_match = orig
+
+        if best_match is not None and best_match.get("mask") is not None:
+            mask = best_match["mask"]
+            area_pixels = best_match.get("area_pixels", int((bbox[2] - bbox[0]) * (bbox[3] - bbox[1])))
+        else:
+            mask = None
+            area_pixels = int((bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
+
+        merged.append({
+            "class_name": class_name,
+            "confidence": float(fs),
+            "bbox": bbox,
+            "mask": mask,
+            "area_pixels": area_pixels,
+        })
+
+    return merged
+
+
 # ---------------------------------------------------------------------------
 # SAHI tiled inference
 # ---------------------------------------------------------------------------
@@ -860,6 +1008,7 @@ def run_ensemble_inference(
     use_sahi: bool = False,
     sahi_slice_size: int = DEFAULT_SAHI_SLICE_SIZE,
     model_paths: dict[str, str] | None = None,
+    fusion_method: str = "iou_dedup",
 ) -> dict:
     """Run multiple models on the same image and merge results.
 
@@ -872,6 +1021,8 @@ def run_ensemble_inference(
         use_sahi: Enable SAHI tiled inference
         sahi_slice_size: Tile size for SAHI slicing
         model_paths: dict of {model_name: file path} (required when use_sahi=True)
+        fusion_method: "iou_dedup" (default) keeps the highest-confidence overlapping
+            detection; "wbf" averages overlapping boxes weighted by confidence.
 
     Returns dict with:
         - "annotated_image": image with all detection overlays
@@ -880,7 +1031,7 @@ def run_ensemble_inference(
         - "inference_time_ms": total inference time
     """
     t0 = time.perf_counter()
-    all_detections = []
+    detections_by_model: dict[str, list[dict]] = {}
     per_model_counts = {}
 
     for model_name, model in models.items():
@@ -899,10 +1050,14 @@ def run_ensemble_inference(
             dets = _extract_detections(result, image.shape)
 
         per_model_counts[model_name] = len(dets)
-        all_detections.extend(dets)
+        detections_by_model[model_name] = dets
 
-    # Deduplicate overlapping detections
-    merged = deduplicate_detections(all_detections)
+    # Merge cross-model detections using selected fusion strategy
+    if fusion_method == "wbf":
+        merged = fuse_detections_wbf(detections_by_model, image.shape)
+    else:
+        flat = [d for dets in detections_by_model.values() for d in dets]
+        merged = deduplicate_detections(flat)
 
     # Two-pass: classify all merged detections with full context
     classify_all_detections(merged, image.shape)

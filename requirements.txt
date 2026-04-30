@@ -4,6 +4,7 @@ torch>=2.0
 opencv-python>=4.8
 Pillow>=10.0
 sahi>=0.11.18
+ensemble-boxes>=1.0.9
 
 # Geospatial
 rasterio>=1.3

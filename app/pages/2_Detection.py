@@ -96,6 +96,12 @@ with st.sidebar:
             help="Size of each tile. Smaller = more tiles = catches smaller cracks but slower.",
         )
 
+    use_wbf = st.toggle(
+        "Weighted Box Fusion (WBF)",
+        value=False,
+        help="Ensemble-only. Averages overlapping boxes from both models weighted by confidence instead of dropping the loser. Typically +1-3 mAP at minimal extra cost.",
+    )
+
     # Priority filter
     st.markdown("---")
     st.header("Display Filters")
@@ -158,6 +164,7 @@ if st.button("Run Detection on All Images", type="primary"):
                 use_sahi=use_sahi,
                 sahi_slice_size=sahi_slice_size,
                 model_paths=ensemble_paths,
+                fusion_method="wbf" if use_wbf else "iou_dedup",
             )
             # Accumulate per-model counts
             for name, count in result.get("per_model_counts", {}).items():
@@ -195,6 +202,8 @@ if st.button("Run Detection on All Images", type="primary"):
         settings_parts.append("TTA")
     if use_sahi:
         settings_parts.append(f"SAHI {sahi_slice_size}px")
+    if use_wbf and mode == "Ensemble (Both Models)":
+        settings_parts.append("WBF")
     settings_str = " | ".join(settings_parts)
 
     if mode == "Ensemble (Both Models)" and total_per_model:
