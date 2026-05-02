@@ -23,8 +23,21 @@ venv/
 .DS_Store
 Thumbs.db
 
-# Environment
+# Environment / secrets — DO NOT REMOVE
 .env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+credentials*
+secrets/
+.aws/
+id_rsa
+id_ed25519
+*_token*
+*_secret*
 
 # Jupyter
 .ipynb_checkpoints/
