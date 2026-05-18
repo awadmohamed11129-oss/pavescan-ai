@@ -4,6 +4,15 @@ from pathlib import Path
 
 import streamlit as st
 
+from scripts.fetch_weights import ensure_weights_present, list_missing_or_invalid
+
+if list_missing_or_invalid():
+    with st.spinner(
+        "First-time setup: downloading model weights (~66 MB). "
+        "This takes about a minute on a fast connection..."
+    ):
+        ensure_weights_present()
+
 _MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
 _AVAILABLE_VERSIONS = []
 if (_MODELS_DIR / "pavescan_crack_seg.pt").exists():
