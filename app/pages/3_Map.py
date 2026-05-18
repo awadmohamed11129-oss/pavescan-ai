@@ -106,7 +106,7 @@ if is_demo:
     st.info(
         "**Demo Mode:** Your images don't contain GPS data. "
         "Showing simulated locations near the University of Toronto campus. "
-        "When you use real drone images with GPS coordinates, markers will appear at actual locations."
+        "When your photos contain GPS metadata (most phone cameras embed it by default), markers will appear at actual locations."
     )
 
 # --- Build map data ---

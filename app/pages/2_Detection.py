@@ -119,7 +119,7 @@ with st.sidebar:
     use_sahi = st.toggle(
         "SAHI Tiled Inference",
         value=False,
-        help="Slices large images into overlapping tiles for detection. Critical for finding small cracks in high-res drone images. Much slower.",
+        help="Slices large images into overlapping tiles for detection. Critical for finding small cracks in high-resolution photos. Much slower.",
     )
 
     sahi_slice_size = 640
