@@ -12,7 +12,10 @@ project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.detection.model import (
+    MODELS_DIR,
+    MODEL_VERSIONS,
     SAFETY_PRIORITIES,
+    compute_iou,
     list_available_models,
     load_ensemble_models,
     load_model,
@@ -20,6 +23,7 @@ from src.detection.model import (
     run_inference,
     summarize_detections,
 )
+from src.detection.clustering import apply_priority_overrides
 
 st.set_page_config(page_title="Detection | PaveScan AI", layout="wide")
 st.title("AI Crack Detection")
@@ -29,12 +33,43 @@ with st.sidebar:
     st.header("Detection Settings")
 
     # Model mode selector
+    v2_seg_present = (MODELS_DIR / MODEL_VERSIONS["v2"]["seg"]).exists()
+    mode_options = ["Ensemble (Both Models)", "Compare V1 vs V2", "Single Model"]
     mode = st.radio(
         "Detection Mode",
-        options=["Ensemble (Both Models)", "Single Model"],
+        options=mode_options,
         index=0,
-        help="Ensemble runs both models and merges results for best coverage. Single uses one model.",
+        key="detection_mode",
+        help="Ensemble merges seg + det for best coverage. Compare runs V1 and V2 ensembles side-by-side. Single uses one model.",
     )
+
+    _prev_detection_mode = st.session_state.get("_prev_detection_mode")
+    if (
+        _prev_detection_mode is not None
+        and _prev_detection_mode != mode
+        and mode != "Compare V1 vs V2"
+    ):
+        for _stale_key in (
+            "compare_mode",
+            "detection_results_v1",
+            "detection_results_v2",
+            "compare_timing",
+            "compare_active_version",
+        ):
+            st.session_state.pop(_stale_key, None)
+    st.session_state["_prev_detection_mode"] = mode
+
+    if mode == "Compare V1 vs V2":
+        if not v2_seg_present:
+            st.error(
+                f"V2 model not found. Drop `{MODEL_VERSIONS['v2']['seg']}` into `models/` and reload."
+            )
+            st.stop()
+        st.caption(
+            "Runs V1 and V2 ensembles on the same image. "
+            "Map/Report use V2 results by default — switch below results."
+        )
+        st.caption("⚠️ Compare loads 4 models (~1.5 GB RAM peak).")
 
     available_models = list_available_models()
     model_names = [m["name"] for m in available_models]
@@ -114,7 +149,7 @@ with st.sidebar:
     )
 
     # Show ensemble info
-    if mode == "Ensemble (Both Models)":
+    if mode in ("Ensemble (Both Models)", "Compare V1 vs V2"):
         ensemble_models = [m for m in available_models if m["name"] != "yolov8n-seg"]
         if ensemble_models:
             st.markdown("---")
@@ -125,6 +160,10 @@ with st.sidebar:
 # Check for uploaded images
 uploaded_files = st.session_state.get("uploaded_files", [])
 
+# Inspector severity override store: {f"{filename}::{cluster_id}": priority_key}
+if "priority_overrides" not in st.session_state:
+    st.session_state["priority_overrides"] = {}
+
 if not uploaded_files:
     st.warning("No images uploaded. Go to the **Upload** page first.")
     st.page_link("pages/1_Upload.py", label="Go to Upload", icon="\U0001f4e4")
@@ -133,95 +172,293 @@ if not uploaded_files:
 # Load model(s)
 with st.spinner("Loading model(s)..."):
     if mode == "Ensemble (Both Models)":
-        ensemble, ensemble_paths = load_ensemble_models()
+        ensemble, ensemble_paths = load_ensemble_models(version="auto")
         if not ensemble:
             st.error("No custom models found in models/ directory.")
             st.stop()
         st.success(f"Ensemble loaded: {', '.join(ensemble.keys())}")
+    elif mode == "Compare V1 vs V2":
+        ensemble_v1, paths_v1 = load_ensemble_models(version="v1")
+        ensemble_v2, paths_v2 = load_ensemble_models(version="v2")
+        st.success(
+            f"V1: {', '.join(ensemble_v1.keys())}  |  V2: {', '.join(ensemble_v2.keys())}"
+        )
     else:
         model = load_model(selected_model_path)
         st.success("Model loaded")
 
 # Run detection button
 if st.button("Run Detection on All Images", type="primary"):
-    all_results = []
-    total_per_model = {}
-    total_inference_ms = 0
-
     progress = st.progress(0, text="Running detection...")
 
-    for i, file in enumerate(uploaded_files):
-        file_bytes = np.frombuffer(file.read(), dtype=np.uint8)
-        file.seek(0)
-        image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    if mode == "Compare V1 vs V2":
+        all_v1, all_v2 = [], []
+        time_v1 = time_v2 = 0.0
+        fusion = "wbf" if use_wbf else "iou_dedup"
 
-        if mode == "Ensemble (Both Models)":
-            result = run_ensemble_inference(
-                ensemble, image,
-                confidence=confidence,
-                imgsz=imgsz,
-                augment=use_tta,
-                use_sahi=use_sahi,
-                sahi_slice_size=sahi_slice_size,
-                model_paths=ensemble_paths,
-                fusion_method="wbf" if use_wbf else "iou_dedup",
+        for i, file in enumerate(uploaded_files):
+            file_bytes = np.frombuffer(file.read(), dtype=np.uint8)
+            file.seek(0)
+            image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+
+            r1 = run_ensemble_inference(
+                ensemble_v1, image,
+                confidence=confidence, imgsz=imgsz, augment=use_tta,
+                use_sahi=use_sahi, sahi_slice_size=sahi_slice_size,
+                model_paths=paths_v1, fusion_method=fusion,
             )
-            # Accumulate per-model counts
-            for name, count in result.get("per_model_counts", {}).items():
-                total_per_model[name] = total_per_model.get(name, 0) + count
-        else:
-            result = run_inference(
-                model, image,
-                confidence=confidence,
-                imgsz=imgsz,
-                augment=use_tta,
+            r2 = run_ensemble_inference(
+                ensemble_v2, image,
+                confidence=confidence, imgsz=imgsz, augment=use_tta,
+                use_sahi=use_sahi, sahi_slice_size=sahi_slice_size,
+                model_paths=paths_v2, fusion_method=fusion,
+            )
+            time_v1 += r1.get("inference_time_ms", 0)
+            time_v2 += r2.get("inference_time_ms", 0)
+            all_v1.append({"filename": file.name, "result": r1, "original": image.copy()})
+            all_v2.append({"filename": file.name, "result": r2, "original": image.copy()})
+
+            progress.progress(
+                (i + 1) / len(uploaded_files),
+                text=f"Comparing {file.name}... ({i + 1}/{len(uploaded_files)})",
             )
 
-        total_inference_ms += result.get("inference_time_ms", 0)
+        # Canonical results for Map/Report = V2 by default
+        st.session_state["detection_results"] = all_v2
+        st.session_state["detection_results_v1"] = all_v1
+        st.session_state["detection_results_v2"] = all_v2
+        st.session_state["compare_mode"] = True
+        st.session_state["compare_active_version"] = "v2"
+        st.session_state["compare_timing"] = {"v1": time_v1, "v2": time_v2}
+        progress.empty()
 
-        all_results.append({
-            "filename": file.name,
-            "result": result,
-        })
-
-        progress.progress(
-            (i + 1) / len(uploaded_files),
-            text=f"Processing {file.name}... ({i + 1}/{len(uploaded_files)})",
-        )
-
-    st.session_state["detection_results"] = all_results
-    progress.empty()
-
-    # Show results summary
-    total_merged = sum(len(r["result"]["detections"]) for r in all_results)
-
-    # Timing display
-    time_str = f"{total_inference_ms / 1000:.1f}s" if total_inference_ms >= 1000 else f"{total_inference_ms:.0f}ms"
-    settings_parts = [f"{imgsz}px"]
-    if use_tta:
-        settings_parts.append("TTA")
-    if use_sahi:
-        settings_parts.append(f"SAHI {sahi_slice_size}px")
-    if use_wbf and mode == "Ensemble (Both Models)":
-        settings_parts.append("WBF")
-    settings_str = " | ".join(settings_parts)
-
-    if mode == "Ensemble (Both Models)" and total_per_model:
-        raw_total = sum(total_per_model.values())
-        model_breakdown = ", ".join(f"{n}: {c}" for n, c in total_per_model.items())
+        total_v1 = sum(len(r["result"]["detections"]) for r in all_v1)
+        total_v2 = sum(len(r["result"]["detections"]) for r in all_v2)
         st.success(
-            f"Detection complete in **{time_str}** ({settings_str}) — {model_breakdown} | "
-            f"After dedup: **{total_merged}** unique detections"
+            f"Comparison complete — V1: **{total_v1}** dets in "
+            f"{time_v1/1000:.1f}s  |  V2: **{total_v2}** dets in {time_v2/1000:.1f}s"
         )
+
     else:
-        st.success(
-            f"Detection complete in **{time_str}** ({settings_str}) — "
-            f"{total_merged} detections across {len(uploaded_files)} image(s)"
+        all_results = []
+        total_per_model = {}
+        total_inference_ms = 0
+
+        for i, file in enumerate(uploaded_files):
+            file_bytes = np.frombuffer(file.read(), dtype=np.uint8)
+            file.seek(0)
+            image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+
+            if mode == "Ensemble (Both Models)":
+                result = run_ensemble_inference(
+                    ensemble, image,
+                    confidence=confidence,
+                    imgsz=imgsz,
+                    augment=use_tta,
+                    use_sahi=use_sahi,
+                    sahi_slice_size=sahi_slice_size,
+                    model_paths=ensemble_paths,
+                    fusion_method="wbf" if use_wbf else "iou_dedup",
+                )
+                # Accumulate per-model counts
+                for name, count in result.get("per_model_counts", {}).items():
+                    total_per_model[name] = total_per_model.get(name, 0) + count
+            else:
+                result = run_inference(
+                    model, image,
+                    confidence=confidence,
+                    imgsz=imgsz,
+                    augment=use_tta,
+                    model_name=Path(selected_model_path).stem if selected_model_path else "single",
+                )
+
+            total_inference_ms += result.get("inference_time_ms", 0)
+
+            all_results.append({
+                "filename": file.name,
+                "result": result,
+            })
+
+            progress.progress(
+                (i + 1) / len(uploaded_files),
+                text=f"Processing {file.name}... ({i + 1}/{len(uploaded_files)})",
+            )
+
+        st.session_state["detection_results"] = all_results
+        st.session_state.pop("compare_mode", None)
+        progress.empty()
+
+        # Show results summary
+        total_merged = sum(len(r["result"]["detections"]) for r in all_results)
+
+        # Timing display
+        time_str = f"{total_inference_ms / 1000:.1f}s" if total_inference_ms >= 1000 else f"{total_inference_ms:.0f}ms"
+        settings_parts = [f"{imgsz}px"]
+        if use_tta:
+            settings_parts.append("TTA")
+        if use_sahi:
+            settings_parts.append(f"SAHI {sahi_slice_size}px")
+        if use_wbf and mode == "Ensemble (Both Models)":
+            settings_parts.append("WBF")
+        settings_str = " | ".join(settings_parts)
+
+        if mode == "Ensemble (Both Models)" and total_per_model:
+            raw_total = sum(total_per_model.values())
+            model_breakdown = ", ".join(f"{n}: {c}" for n, c in total_per_model.items())
+            st.success(
+                f"Detection complete in **{time_str}** ({settings_str}) — {model_breakdown} | "
+                f"After dedup: **{total_merged}** unique detections"
+            )
+        else:
+            st.success(
+                f"Detection complete in **{time_str}** ({settings_str}) — "
+                f"{total_merged} detections across {len(uploaded_files)} image(s)"
+            )
+
+# ==========================================
+# COMPARISON VIEW (V1 vs V2)
+# ==========================================
+# Belt-and-braces: clear a stale compare_mode flag if the result lists are gone
+# (e.g. partial cleanup left the flag set without populated v1/v2 results).
+if st.session_state.get("compare_mode") and not (
+    st.session_state.get("detection_results_v1")
+    and st.session_state.get("detection_results_v2")
+):
+    st.session_state.pop("compare_mode", None)
+
+if st.session_state.get("compare_mode"):
+    results_v1 = st.session_state.get("detection_results_v1", [])
+    results_v2 = st.session_state.get("detection_results_v2", [])
+    timing = st.session_state.get("compare_timing", {"v1": 0, "v2": 0})
+
+    all_v1 = [d for r in results_v1 for d in r["result"]["detections"]]
+    all_v2 = [d for r in results_v2 for d in r["result"]["detections"]]
+    sum_v1 = summarize_detections(all_v1)
+    sum_v2 = summarize_detections(all_v2)
+
+    # Spatial agreement: V1 detection counts as a match if any V2 detection on
+    # the same image overlaps it at IoU >= 0.5.
+    agree_count = 0
+    for r1, r2 in zip(results_v1, results_v2):
+        d1s = r1["result"]["detections"]
+        d2s = r2["result"]["detections"]
+        for d1 in d1s:
+            for d2 in d2s:
+                if compute_iou(d1["bbox"], d2["bbox"]) >= 0.5:
+                    agree_count += 1
+                    break
+
+    st.subheader("V1 vs V2 Comparison")
+
+    cmp_col1, cmp_col2 = st.columns(2)
+    with cmp_col1:
+        st.markdown("### V1")
+        st.metric("Total detections", sum_v1["total_detections"])
+        st.metric("Inference time", f"{timing['v1']/1000:.1f}s")
+        st.caption(
+            f"Critical: {sum_v1['by_priority'].get('critical', 0)}  |  "
+            f"Urgent: {sum_v1['by_priority'].get('urgent', 0)}  |  "
+            f"Monitor: {sum_v1['by_priority'].get('monitor', 0)}  |  "
+            f"Routine: {sum_v1['by_priority'].get('routine', 0)}"
         )
+    with cmp_col2:
+        st.markdown("### V2")
+        st.metric("Total detections", sum_v2["total_detections"])
+        st.metric("Inference time", f"{timing['v2']/1000:.1f}s")
+        st.caption(
+            f"Critical: {sum_v2['by_priority'].get('critical', 0)}  |  "
+            f"Urgent: {sum_v2['by_priority'].get('urgent', 0)}  |  "
+            f"Monitor: {sum_v2['by_priority'].get('monitor', 0)}  |  "
+            f"Routine: {sum_v2['by_priority'].get('routine', 0)}"
+        )
+
+    if sum_v1["total_detections"] > 0:
+        st.caption(
+            f"Spatial agreement (IoU≥0.5): **{agree_count} of {sum_v1['total_detections']}** "
+            f"V1 detections match a V2 detection."
+        )
+
+    st.markdown("---")
+
+    # Side-by-side per-image. Compare mode is intentionally raw-boxes —
+    # clustering applies only to single-version views (Single + Ensemble).
+    for r1, r2 in zip(results_v1, results_v2):
+        with st.expander(
+            f"\U0001f4f7 {r1['filename']} — V1: {len(r1['result']['detections'])} dets  |  "
+            f"V2: {len(r2['result']['detections'])} dets"
+        ):
+            img_col0, img_col1, img_col2 = st.columns(3)
+            dets_v1 = r1["result"]["detections"]
+            dets_v2 = r2["result"]["detections"]
+            mask_count_v1 = sum(1 for d in dets_v1 if d.get("mask") is not None)
+            mask_count_v2 = sum(1 for d in dets_v2 if d.get("mask") is not None)
+            with img_col0:
+                st.markdown("**Original**")
+                st.image(
+                    cv2.cvtColor(r1["original"], cv2.COLOR_BGR2RGB),
+                    use_container_width=True,
+                    output_format="PNG",
+                )
+                st.caption("Photo as uploaded")
+            with img_col1:
+                st.markdown(f"**V1** — {r1['result'].get('inference_time_ms', 0):.0f}ms")
+                st.image(
+                    cv2.cvtColor(r1["result"]["annotated_image"], cv2.COLOR_BGR2RGB),
+                    use_container_width=True,
+                    output_format="PNG",
+                )
+                st.caption(f"Mask outlines: {mask_count_v1}/{len(dets_v1)}")
+            with img_col2:
+                st.markdown(f"**V2** — {r2['result'].get('inference_time_ms', 0):.0f}ms")
+                st.image(
+                    cv2.cvtColor(r2["result"]["annotated_image"], cv2.COLOR_BGR2RGB),
+                    use_container_width=True,
+                    output_format="PNG",
+                )
+                st.caption(f"Mask outlines: {mask_count_v2}/{len(dets_v2)}")
+
+    st.markdown("---")
+
+    # Result-set toggle for downstream Map/Report pages
+    active = st.session_state.get("compare_active_version", "v2")
+    choice = st.radio(
+        "Use which results for Map/Report?",
+        options=["V2", "V1"],
+        index=0 if active == "v2" else 1,
+        horizontal=True,
+        key="compare_result_set",
+    )
+    new_active = "v2" if choice == "V2" else "v1"
+    if new_active != active:
+        st.session_state["compare_active_version"] = new_active
+        st.session_state["detection_results"] = (
+            st.session_state["detection_results_v2"]
+            if new_active == "v2"
+            else st.session_state["detection_results_v1"]
+        )
+        st.rerun()
+    else:
+        st.session_state["detection_results"] = (
+            st.session_state["detection_results_v2"]
+            if new_active == "v2"
+            else st.session_state["detection_results_v1"]
+        )
+
+    st.caption(f"Map and Report will use **{choice}** results.")
+    st.markdown("---")
 
 # Display results
 if "detection_results" in st.session_state:
     results = st.session_state["detection_results"]
+
+    # Apply inspector overrides BEFORE summary so banners + metrics + filter
+    # all reflect the human-classified severity. Streamlit reruns on every
+    # button click, so this happens fresh each interaction.
+    apply_priority_overrides(
+        results,
+        st.session_state.get("priority_overrides", {}),
+        SAFETY_PRIORITIES,
+    )
 
     # Summary metrics
     all_dets = [d for r in results for d in r["result"]["detections"]]
@@ -325,70 +562,130 @@ if "detection_results" in st.session_state:
     st.markdown("---")
 
     # ==========================================
-    # PER-IMAGE RESULTS (sorted by priority)
+    # PER-IMAGE RESULTS — cluster cards (Phase 1)
     # ==========================================
-    priority_order = {"critical": 0, "urgent": 1, "monitor": 2, "routine": 3}
+    # AI surfaces candidate regions via spatial clustering with multi-model
+    # agreement as the trust signal; the inspector classifies severity via
+    # 4-button override per cluster. Per-detection auto-severity is shown
+    # only inside the "Underlying detections" expander as raw model output.
+
+    overrides = st.session_state["priority_overrides"]
+    priority_levels = ["routine", "monitor", "urgent", "critical"]
+    priority_rank = {"routine": 0, "monitor": 1, "urgent": 2, "critical": 3}
 
     for item in results:
-        dets = item["result"]["detections"]
+        clusters = item["result"].get("clusters", [])
+        dets = item["result"].get("detections", [])
 
-        # Filter by selected priority levels
-        filtered_dets = [
-            d for d in dets
-            if d.get("safety_priority", "routine") in priority_filter
-        ]
+        def _eff_priority(cluster, _filename=item["filename"]):
+            key = f"{_filename}::{cluster['cluster_id']}"
+            return overrides.get(key, cluster.get("suggested_priority", "routine"))
 
-        with st.expander(
-            f"\U0001f4f7 {item['filename']} — {len(filtered_dets)} detections"
-            + (f" ({len(dets) - len(filtered_dets)} filtered out)" if len(filtered_dets) < len(dets) else "")
-        ):
-            annotated = item["result"]["annotated_image"]
+        filtered_clusters = [c for c in clusters if _eff_priority(c) in priority_filter]
+        hidden_count = len(clusters) - len(filtered_clusters)
+
+        header = f"\U0001f4f7 {item['filename']} — {len(filtered_clusters)} regions"
+        if hidden_count > 0:
+            header += f" ({hidden_count} filtered out)"
+
+        with st.expander(header):
+            # Cluster outline image (raw boxes are kept for Compare mode).
+            # `is not None` check, not `or` — numpy arrays raise on bool().
+            clusters_img = item["result"].get("annotated_clusters")
+            annotated = clusters_img if clusters_img is not None else item["result"]["annotated_image"]
             annotated_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-            st.image(annotated_rgb, use_container_width=True)
+            st.image(annotated_rgb, use_container_width=True, output_format="PNG")
 
-            # Per-image timing
             img_time = item["result"].get("inference_time_ms", 0)
             if img_time > 0:
                 st.caption(f"Inference time: {img_time:.0f}ms")
 
-            if filtered_dets:
-                # Sort by priority (critical first), then by severity score (highest first)
-                sorted_dets = sorted(
-                    filtered_dets,
-                    key=lambda d: (
-                        priority_order.get(d.get("safety_priority", "routine"), 99),
-                        -d.get("severity_score", 0),
-                    ),
+            if not filtered_clusters:
+                if clusters:
+                    st.caption("All regions filtered out by sidebar priority filter.")
+                else:
+                    st.caption("No detections on this image.")
+                continue
+
+            sorted_clusters = sorted(
+                filtered_clusters,
+                key=lambda c: (
+                    -priority_rank.get(_eff_priority(c), 0),
+                    -c.get("detection_count", 0),
+                ),
+            )
+
+            for cluster in sorted_clusters:
+                cid = cluster["cluster_id"]
+                key = f"{item['filename']}::{cid}"
+                suggested = cluster.get("suggested_priority", "routine")
+                effective = overrides.get(key, suggested)
+                eff_info = SAFETY_PRIORITIES.get(effective, SAFETY_PRIORITIES["routine"])
+                is_overridden = key in overrides and overrides[key] != suggested
+
+                n_signals = cluster.get("detection_count", 0)
+                n_models = len(cluster.get("models_agreeing", []))
+                models_str = ", ".join(cluster.get("models_agreeing", [])) or "—"
+                mask_pct = cluster.get("mask_coverage_pct", 0.0)
+
+                chip_color = eff_info["color_hex"]
+                chip_text_color = "#333" if effective == "monitor" else "white"
+                chip_label = eff_info["label"]
+                if is_overridden:
+                    chip_label += " (inspector)"
+
+                st.markdown(
+                    f"<div style='border-left:4px solid {chip_color};padding:10px 14px;"
+                    f"margin:8px 0;background:#fafafa;border-radius:6px;'>"
+                    f"<div style='display:flex;align-items:center;gap:10px;flex-wrap:wrap;'>"
+                    f"<span style='font-size:1.05em;font-weight:600;'>"
+                    f"Region {cid + 1} &middot; {n_signals} signals &middot; {n_models}-model agreement</span>"
+                    f"<span style='background:{chip_color};color:{chip_text_color};"
+                    f"padding:3px 10px;border-radius:12px;font-weight:700;font-size:0.78em;'>"
+                    f"{chip_label}</span>"
+                    f"</div>"
+                    f"<div style='color:#888;font-size:0.85em;margin-top:4px;'>"
+                    f"AI suggests: <b>{suggested.upper()}</b> &middot; "
+                    f"Models: {models_str} &middot; Mask coverage: {mask_pct:.0f}%"
+                    f"</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
                 )
 
-                for det in sorted_dets:
-                    priority_key = det.get("safety_priority", "routine")
-                    priority_info = SAFETY_PRIORITIES.get(priority_key, SAFETY_PRIORITIES["routine"])
-                    severity = det.get("severity", "low")
-                    severity_score = det.get("severity_score", 0.0)
-                    width_px = det.get("width_pixels", 0.0)
-                    deterioration = det.get("deterioration_risk", {})
+                bcols = st.columns(4)
+                for i, level in enumerate(priority_levels):
+                    info = SAFETY_PRIORITIES[level]
+                    btn_label = info["label"].title()
+                    if effective == level:
+                        btn_label = f"✓ {btn_label}"
+                    if bcols[i].button(
+                        btn_label,
+                        key=f"override_{item['filename']}_{cid}_{level}",
+                        use_container_width=True,
+                    ):
+                        if level == suggested:
+                            st.session_state["priority_overrides"].pop(key, None)
+                        else:
+                            st.session_state["priority_overrides"][key] = level
+                        st.rerun()
 
-                    # Priority badge
-                    badge_color = priority_info["color_hex"]
-                    badge_text = priority_info["label"]
-                    text_color = "#333" if priority_key == "monitor" else "white"
-
-                    st.markdown(
-                        f"<div style='border-left:4px solid {badge_color};padding:8px 12px;margin:4px 0;background:#f8f8f8;border-radius:4px;'>"
-                        f"<span style='background:{badge_color};color:{text_color};padding:2px 8px;border-radius:4px;font-weight:bold;font-size:0.8em;'>"
-                        f"{badge_text}</span> "
-                        f"<b>{det['class_name']}</b> &mdash; "
-                        f"Confidence: {det['confidence']:.1%} &mdash; "
-                        f"Severity: {severity.upper()} ({severity_score:.2f}) &mdash; "
-                        f"Area: {det['area_pixels']:,} px"
-                        + (f" &mdash; Width: {width_px:.0f} px" if width_px > 0 else "")
-                        + f"<br><small style='color:#666;'>"
-                        f"\U0001f527 {det.get('recommended_action', '')}"
-                        + (f" &mdash; \u26a0\ufe0f {deterioration.get('warning', '')}" if deterioration.get("warning") else "")
-                        + f"</small></div>",
-                        unsafe_allow_html=True,
-                    )
+                indices = cluster.get("detection_indices", [])
+                with st.expander(f"Underlying detections ({len(indices)})", expanded=False):
+                    rows = []
+                    for idx in indices:
+                        if idx >= len(dets):
+                            continue
+                        d = dets[idx]
+                        rows.append({
+                            "class": d.get("class_name", ""),
+                            "confidence": f"{d.get('confidence', 0):.0%}",
+                            "severity": d.get("severity", ""),
+                            "raw_priority": d.get("original_safety_priority", d.get("safety_priority", "")),
+                            "width_px": f"{d.get('width_pixels', 0):.0f}",
+                            "models": ", ".join(d.get("models_agreeing", [])),
+                        })
+                    if rows:
+                        st.dataframe(rows, use_container_width=True, hide_index=True)
 
     st.markdown("---")
     st.info("Head to the **Map** page to see detections on an interactive map.")
