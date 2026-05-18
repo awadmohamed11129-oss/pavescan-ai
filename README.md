@@ -228,3 +228,5 @@ A second platform module for **site mapping & surveying** — the natural comple
 ## License
 
 See [LICENSE](LICENSE).
+
+<!-- live demo: https://pavescan-ai-kctjew6jj8tccs79an5dcd.streamlit.app/ — auto-deploy via Streamlit Community Cloud -->
