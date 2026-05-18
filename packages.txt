@@ -1,2 +1,4 @@
 libgl1
 libglib2.0-0t64
+libcairo2-dev
+pkg-config
