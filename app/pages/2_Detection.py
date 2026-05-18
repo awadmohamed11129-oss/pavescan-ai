@@ -38,7 +38,7 @@ with st.sidebar:
     mode = st.radio(
         "Detection Mode",
         options=mode_options,
-        index=0,
+        index=1,
         key="detection_mode",
         help="Ensemble merges seg + det for best coverage. Compare runs V1 and V2 ensembles side-by-side. Single uses one model.",
     )
