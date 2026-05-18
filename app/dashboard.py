@@ -1,6 +1,25 @@
 """PaveScan AI — Main Streamlit Dashboard."""
 
+from pathlib import Path
+
 import streamlit as st
+
+from scripts.fetch_weights import ensure_weights_present, list_missing_or_invalid
+
+if list_missing_or_invalid():
+    with st.spinner(
+        "First-time setup: downloading model weights (~66 MB). "
+        "This takes about a minute on a fast connection..."
+    ):
+        ensure_weights_present()
+
+_MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
+_AVAILABLE_VERSIONS = []
+if (_MODELS_DIR / "pavescan_crack_seg.pt").exists():
+    _AVAILABLE_VERSIONS.append("V1")
+if (_MODELS_DIR / "pavescan_crack_seg_v2.pt").exists():
+    _AVAILABLE_VERSIONS.append("V2")
+_VERSIONS_LABEL = "+".join(_AVAILABLE_VERSIONS) if _AVAILABLE_VERSIONS else "none"
 
 st.set_page_config(
     page_title="PaveScan AI",
@@ -10,30 +29,26 @@ st.set_page_config(
 )
 
 st.title("PaveScan AI")
-st.subheader("Drone-Based Automated Pavement Inspection System")
+st.subheader("Automated pavement inspection from phone or dashcam footage")
 
 st.markdown("---")
 
 # Overview cards
-col1, col2, col3, col4, col5 = st.columns(5)
+col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    st.metric("Mission", "Route Planner")
-    st.caption("Plan autonomous survey flights")
+    st.metric("Pipeline", "Upload → Detect")
+    st.caption("Drop in pavement photos")
 
 with col2:
-    st.metric("Pipeline", "Upload → Detect")
-    st.caption("Drag-and-drop drone images")
-
-with col3:
-    st.metric("AI Model", "YOLO11-seg")
+    st.metric("AI Model", f"YOLO11-seg ({_VERSIONS_LABEL})")
     st.caption("Crack detection & segmentation")
 
-with col4:
+with col3:
     st.metric("Standard", "ASTM D6433")
     st.caption("Pavement Condition Index")
 
-with col5:
+with col4:
     st.metric("Output", "PDF Report")
     st.caption("Professional inspection report")
 
@@ -42,28 +57,25 @@ st.markdown("---")
 st.markdown("""
 ### How It Works
 
-1. **Plan** — Draw a flight route and configure mission parameters
-2. **Upload** — Drag and drop drone images or an orthomosaic
-3. **Detect** — AI identifies cracks, potholes, and surface defects
-4. **Map** — View detections on an interactive map with severity heatmap
-5. **Report** — Generate a professional PDF inspection report with PCI scores
+1. **Upload** — Drop in pavement photos from a phone, dashcam, or any camera
+2. **Detect** — AI identifies cracks, potholes, and surface defects
+3. **Map** — View detections on an interactive map with severity heatmap
+4. **Report** — Generate a professional PDF inspection report with PCI scores
 
 ### Get Started
 
 Use the **sidebar** to navigate between pages, or click below:
 """)
 
-col1, col2, col3, col4, col5 = st.columns(5)
+col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    st.page_link("pages/5_Mission.py", label="Plan Mission", icon="✈️")
-with col2:
     st.page_link("pages/1_Upload.py", label="Upload Images", icon="📤")
-with col3:
+with col2:
     st.page_link("pages/2_Detection.py", label="Run Detection", icon="🔍")
-with col4:
+with col3:
     st.page_link("pages/3_Map.py", label="View Map", icon="🗺️")
-with col5:
+with col4:
     st.page_link("pages/4_Report.py", label="Generate Report", icon="📄")
 
 st.markdown("---")

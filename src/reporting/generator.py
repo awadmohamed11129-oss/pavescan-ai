@@ -204,7 +204,11 @@ def _generate_priority_chart_base64(by_priority: dict) -> str:
     return base64.b64encode(buf.read()).decode("utf-8")
 
 
-def _build_safety_assessment_html(summary: dict, pci_score: int) -> str:
+def _build_safety_assessment_html(
+    summary: dict,
+    pci_score: int,
+    inspector_has_overrides: bool = False,
+) -> str:
     """Build the safety assessment alert box at the top of the report."""
     by_priority = summary.get("by_priority", {})
     critical = by_priority.get("critical", 0)
@@ -259,6 +263,21 @@ def _build_safety_assessment_html(summary: dict, pci_score: int) -> str:
             f"Continue routine monitoring."
         )
 
+    if inspector_has_overrides:
+        attribution = (
+            "<div style='font-size:10px; color:#555; font-style:italic; "
+            "margin-top:8px;'>"
+            "Severities reviewed and assigned by inspector."
+            "</div>"
+        )
+    else:
+        attribution = (
+            "<div style='font-size:10px; color:#555; font-style:italic; "
+            "margin-top:8px;'>"
+            "Severities are AI suggestions — no inspector review applied."
+            "</div>"
+        )
+
     return f"""
     <div style="background:{bg_color}; border:2px solid {border_color};
                 padding:15px 20px; margin:15px 0; page-break-inside:avoid;">
@@ -267,6 +286,7 @@ def _build_safety_assessment_html(summary: dict, pci_score: int) -> str:
             {icon} {title}
         </div>
         <div style="font-size:11px; color:#333;">{body}</div>
+        {attribution}
     </div>
     """
 
@@ -361,7 +381,7 @@ def _build_methodology_html() -> str:
                 <b>Detection:</b> YOLO-based object detection and instance segmentation models trained
                 on pavement distress imagery. Ensemble inference with IoU-based deduplication is used
                 for improved coverage. Optional SAHI tiled inference detects small defects in high-resolution
-                drone imagery.
+                photos.
             </p>
             <p>
                 <b>Severity Assessment:</b> Multi-factor scoring informed by ASTM D6433 Standard Practice
@@ -414,8 +434,11 @@ def generate_report_html(
     chart_b64 = generate_chart_base64(summary)
     priority_chart_b64 = _generate_priority_chart_base64(by_priority)
 
-    # Build safety assessment
-    safety_assessment_html = _build_safety_assessment_html(summary, pci_score)
+    # Build safety assessment (with inspector-override attribution line)
+    inspector_has_overrides = bool(project_info.get("inspector_has_overrides", False))
+    safety_assessment_html = _build_safety_assessment_html(
+        summary, pci_score, inspector_has_overrides=inspector_has_overrides
+    )
 
     # Build maintenance plan
     maintenance_plan_html = _build_maintenance_plan_html(all_detections)

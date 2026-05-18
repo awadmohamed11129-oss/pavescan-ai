@@ -22,6 +22,13 @@ CUSTOM_MODELS = [
     "pavescan_rdd2022.pt",        # YOLOv8n fallback
 ]
 
+# Per-version slot map: each ensemble has one segmentation model + one detection model.
+# RDD2022 detector hasn't been retrained yet, so V2 mode shares the V1 detector.
+MODEL_VERSIONS = {
+    "v1": {"seg": "pavescan_crack_seg.pt",    "det": "pavescan_rdd2022.pt"},
+    "v2": {"seg": "pavescan_crack_seg_v2.pt", "det": "pavescan_rdd2022.pt"},
+}
+
 # Fallback: pretrained COCO model (detects generic objects, not cracks)
 FALLBACK_MODEL = "yolov8n-seg.pt"
 
@@ -179,20 +186,40 @@ def list_available_models() -> list[dict]:
     return models
 
 
-def load_ensemble_models() -> tuple[dict[str, YOLO], dict[str, str]]:
-    """Load all custom-trained models for ensemble inference.
+def load_ensemble_models(version: str = "auto") -> tuple[dict[str, YOLO], dict[str, str]]:
+    """Load one segmentation + one detection model for ensemble inference.
+
+    Args:
+        version: "v1" forces V1 seg + V1 det. "v2" forces V2 seg + V1 det
+            (no V2 detector exists yet). "auto" prefers V2 seg with V1 fallback.
 
     Returns:
-        models: dict mapping model name to loaded YOLO model
-        model_paths: dict mapping model name to file path (needed for SAHI)
+        models: dict mapping model file stem to loaded YOLO model
+        model_paths: dict mapping model file stem to file path (needed for SAHI)
     """
+    if version == "auto":
+        slots = dict(MODEL_VERSIONS["v2"])
+        if not (MODELS_DIR / slots["seg"]).exists():
+            slots["seg"] = MODEL_VERSIONS["v1"]["seg"]
+    elif version in MODEL_VERSIONS:
+        slots = MODEL_VERSIONS[version]
+    else:
+        raise ValueError(f"Unknown model version: {version!r}. Expected 'v1', 'v2', or 'auto'.")
+
     models = {}
     model_paths = {}
-    for name in CUSTOM_MODELS:
-        path = MODELS_DIR / name
-        if path.exists():
-            models[name] = YOLO(str(path))
-            model_paths[name] = str(path)
+    for filename in (slots["seg"], slots["det"]):
+        path = MODELS_DIR / filename
+        if not path.exists():
+            if version in ("v1", "v2"):
+                raise FileNotFoundError(
+                    f"Required {version.upper()} model missing: {filename}. "
+                    f"Drop the file into {MODELS_DIR} and retry."
+                )
+            continue
+        stem = path.stem
+        models[stem] = YOLO(str(path))
+        model_paths[stem] = str(path)
     return models, model_paths
 
 
@@ -637,6 +664,11 @@ def classify_all_detections(detections: list[dict], image_shape: tuple) -> list[
         det["safety_priority"] = priority_key
         det["recommended_action"] = recommended_action
 
+        # Capture originals so the inspector-override layer can toggle back
+        # to AI suggestion without re-running classification.
+        det["original_safety_priority"] = priority_key
+        det["original_recommended_action"] = recommended_action
+
         # Deterioration risk assessment
         det["deterioration_risk"] = assess_deterioration_risk(
             class_name=det["class_name"],
@@ -971,6 +1003,7 @@ def run_inference(
     confidence: float = CONFIDENCE_THRESHOLD,
     imgsz: int = DEFAULT_IMGSZ,
     augment: bool = False,
+    model_name: str = "single",
 ) -> dict:
     """Run crack detection on a single image with one model.
 
@@ -986,17 +1019,52 @@ def run_inference(
     result = results[0]
     detections = _extract_detections(result, image.shape)
 
+    # Stamp single-model provenance so clustering downstream has a consistent shape
+    for det in detections:
+        det["models_agreeing"] = [model_name]
+
     # Two-pass: classify all detections with full context
     classify_all_detections(detections, image.shape)
 
-    # Use our custom annotator (priority colors, not YOLO's built-in)
+    # Phase 1: spatial clustering for the cluster-card UI. Imported locally to
+    # avoid the model<->clustering import cycle.
+    from .clustering import cluster_detections
+    clusters = cluster_detections(detections)
+
+    # Two annotated images: raw boxes (Compare mode + legacy callers) and
+    # cluster outlines (Phase 1 default per-image card view).
     annotated = _draw_detections(image.copy(), detections)
+    annotated_clusters = _draw_clusters(image.copy(), detections, clusters)
 
     return {
         "annotated_image": annotated,
+        "annotated_clusters": annotated_clusters,
         "detections": detections,
+        "clusters": clusters,
         "inference_time_ms": inference_ms,
     }
+
+
+def _track_model_agreement(
+    merged: list[dict],
+    detections_by_model: dict[str, list[dict]],
+    iou_threshold: float = 0.4,
+) -> None:
+    """Stamp each merged detection with the list of models whose original
+    detections overlap it at IoU >= threshold.
+
+    Multi-model agreement is the structural trust signal we surface in cluster
+    cards — independent agreement across 3 sub-models is far more meaningful
+    than any single confidence number.
+    """
+    for det in merged:
+        agreeing = []
+        for model_name, originals in detections_by_model.items():
+            for orig in originals:
+                if compute_iou(det["bbox"], orig["bbox"]) >= iou_threshold:
+                    agreeing.append(model_name)
+                    break
+        det["models_agreeing"] = sorted(set(agreeing))
 
 
 def run_ensemble_inference(
@@ -1059,17 +1127,30 @@ def run_ensemble_inference(
         flat = [d for dets in detections_by_model.values() for d in dets]
         merged = deduplicate_detections(flat)
 
+    # Tag each merged detection with the set of models that fired on its region.
+    # Multi-model agreement is the headline trust signal for cluster cards.
+    _track_model_agreement(merged, detections_by_model)
+
     # Two-pass: classify all merged detections with full context
     classify_all_detections(merged, image.shape)
 
-    # Draw all merged detections on the image (priority-colored)
+    # Phase 1: spatial clustering for the cluster-card UI. Imported locally to
+    # avoid the model<->clustering import cycle.
+    from .clustering import cluster_detections
+    clusters = cluster_detections(merged)
+
+    # Two annotated images: raw boxes (Compare mode side-by-side) and cluster
+    # outlines (Phase 1 default per-image card view).
     annotated = _draw_detections(image.copy(), merged)
+    annotated_clusters = _draw_clusters(image.copy(), merged, clusters)
 
     inference_ms = (time.perf_counter() - t0) * 1000
 
     return {
         "annotated_image": annotated,
+        "annotated_clusters": annotated_clusters,
         "detections": merged,
+        "clusters": clusters,
         "per_model_counts": per_model_counts,
         "inference_time_ms": inference_ms,
     }
@@ -1118,10 +1199,60 @@ def _draw_detections(image: np.ndarray, detections: list[dict]) -> np.ndarray:
 
         # Draw mask overlay if available
         if det.get("mask") is not None:
-            mask_resized = cv2.resize(det["mask"], (image.shape[1], image.shape[0]))
+            mask_resized = cv2.resize(
+                det["mask"], (image.shape[1], image.shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            )
             overlay = image.copy()
             overlay[mask_resized > 0] = color
             image = cv2.addWeighted(image, 0.7, overlay, 0.3, 0)
+            contours, _ = cv2.findContours(
+                mask_resized, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+            )
+            outline_thickness = 3 if priority_key in ("critical", "urgent") else 2
+            cv2.drawContours(image, contours, -1, color, outline_thickness)
+
+    return image
+
+
+# Neutral cluster outline color (BGR). Severity-keyed colors are intentionally
+# NOT used here — Phase 1 decouples severity from default display.
+CLUSTER_OUTLINE_BGR = (51, 153, 255)  # orange in BGR
+
+
+def _draw_clusters(
+    image: np.ndarray,
+    detections: list[dict],
+    clusters: list[dict],
+) -> np.ndarray:
+    """Draw one neutral-orange union outline per cluster with a header label.
+
+    Phase 1 default render mode. Per-detection boxes are intentionally omitted
+    so the inspector sees ~5-8 candidate regions instead of 30+ overlapping
+    boxes. Severity color-coding is left out by design — the inspector
+    classifies severity manually via the cluster card UI.
+    """
+    if not clusters:
+        return image
+
+    color = CLUSTER_OUTLINE_BGR
+    for cluster in clusters:
+        x1, y1, x2, y2 = (int(v) for v in cluster["bbox_union"])
+        cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
+
+        n_models = len(cluster.get("models_agreeing", []))
+        n_signals = cluster.get("detection_count", 0)
+        cid = cluster.get("cluster_id", 0)
+        label = f"Region {cid + 1} · {n_signals} signals · {n_models} models"
+
+        font_scale = 0.55
+        thickness = 1
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+        cv2.rectangle(image, (x1, y1 - th - 8), (x1 + tw + 6, y1), color, -1)
+        cv2.putText(
+            image, label, (x1 + 3, y1 - 5),
+            cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness,
+        )
 
     return image
 

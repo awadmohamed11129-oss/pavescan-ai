@@ -48,3 +48,8 @@ runs/
 
 # Generated reports (produced by app + smoke tests)
 reports/
+
+# Local-only notebook artifacts (training output bundles, edit-helper scripts, backups)
+notebooks/v2_finetune_results/
+notebooks/_*.py
+*.ipynb.bak

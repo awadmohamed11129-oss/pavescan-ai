@@ -9,6 +9,7 @@ import streamlit as st
 project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(project_root))
 
+from src.detection.clustering import apply_priority_overrides
 from src.detection.model import SAFETY_PRIORITIES, summarize_detections
 from src.mapping.geo import assign_coordinates_to_results
 from src.reporting.generator import (
@@ -53,6 +54,16 @@ if "detection_results" not in st.session_state or not st.session_state["detectio
 
 detection_results = st.session_state["detection_results"]
 uploaded_files = st.session_state.get("uploaded_files", [])
+
+# Apply inspector overrides BEFORE summary/PCI so the report reflects the
+# human-classified safety priority everywhere (priority counts, maintenance
+# plan, executive summary). PCI itself is computed from raw `severity` and
+# stays an automated metric.
+inspector_has_overrides = apply_priority_overrides(
+    detection_results,
+    st.session_state.get("priority_overrides", {}),
+    SAFETY_PRIORITIES,
+)
 
 # --- Compute summary stats ---
 all_detections = [d for r in detection_results for d in r["result"]["detections"]]
@@ -124,6 +135,7 @@ if st.button("Generate PDF Report", type="primary"):
             "project_name": project_name,
             "inspector_name": inspector_name or "Not specified",
             "notes": notes,
+            "inspector_has_overrides": inspector_has_overrides,
         }
 
         # Generate HTML and convert to PDF
