@@ -1243,7 +1243,7 @@ def _draw_clusters(
         n_models = len(cluster.get("models_agreeing", []))
         n_signals = cluster.get("detection_count", 0)
         cid = cluster.get("cluster_id", 0)
-        label = f"Region {cid + 1} · {n_signals} signals · {n_models} models"
+        label = f"Region {cid + 1} | {n_signals} signals | {n_models} models"
 
         font_scale = 0.55
         thickness = 1
