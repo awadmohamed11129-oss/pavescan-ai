@@ -24,9 +24,31 @@ from src.detection.model import (
     summarize_detections,
 )
 from src.detection.clustering import apply_priority_overrides
+from src.detection.presets import CUSTOM_PRESET, DEFAULT_PRESET, DETECTION_PRESETS
 
 st.set_page_config(page_title="Detection | PaveScan AI", layout="wide")
 st.title("AI Crack Detection")
+
+# Seed inference-knob state so the preset callback and the widgets share one
+# source of truth. setdefault re-seeds keys Streamlit cleaned up when a
+# conditional widget (SAHI tile size) wasn't rendered on the previous run.
+for _knob, _default in DETECTION_PRESETS[DEFAULT_PRESET]["values"].items():
+    st.session_state.setdefault(_knob, _default)
+st.session_state.setdefault("detection_preset", DEFAULT_PRESET)
+
+
+def _apply_preset():
+    """Copy the chosen preset's values into the knob widgets' session state."""
+    chosen = st.session_state["detection_preset"]
+    if chosen == CUSTOM_PRESET:
+        return
+    for knob, value in DETECTION_PRESETS[chosen]["values"].items():
+        st.session_state[knob] = value
+
+
+def _knob_touched():
+    """Any manual knob change means the settings no longer match a preset."""
+    st.session_state["detection_preset"] = CUSTOM_PRESET
 
 # Sidebar controls
 with st.sidebar:
@@ -91,12 +113,24 @@ with st.sidebar:
             f"**Classes ({info['num_classes']}):** {', '.join(info['classes'])}"
         )
 
+    st.markdown("---")
+    preset = st.selectbox(
+        "Detection Preset",
+        options=list(DETECTION_PRESETS) + [CUSTOM_PRESET],
+        key="detection_preset",
+        on_change=_apply_preset,
+        help="One-click bundles of the settings below, tuned on real survey photos. Changing any setting manually switches to Custom.",
+    )
+    if preset != CUSTOM_PRESET:
+        st.caption(DETECTION_PRESETS[preset]["description"])
+
     confidence = st.slider(
         "Confidence Threshold",
         min_value=0.05,
         max_value=0.9,
-        value=0.15,
         step=0.05,
+        key="confidence",
+        on_change=_knob_touched,
         help="Lower = more detections (possibly noisy). Higher = fewer but more certain.",
     )
 
@@ -106,40 +140,52 @@ with st.sidebar:
     imgsz = st.select_slider(
         "Inference Resolution",
         options=[640, 960, 1280, 1600],
-        value=1280,
+        key="imgsz",
+        on_change=_knob_touched,
         help="Higher resolution = more detail = better detection of small cracks. Uses more memory and is slower.",
     )
 
     use_tta = st.toggle(
         "Test-Time Augmentation (TTA)",
-        value=False,
+        key="use_tta",
+        on_change=_knob_touched,
         help="Runs inference multiple times with flips/scales and averages results. ~3-4x slower but ~1-3% more accurate.",
     )
 
     use_sahi = st.toggle(
         "SAHI Tiled Inference",
-        value=False,
+        key="use_sahi",
+        on_change=_knob_touched,
         help="Slices large images into overlapping tiles for detection. Critical for finding small cracks in high-resolution photos. Much slower.",
     )
 
-    sahi_slice_size = 640
+    sahi_slice_size = st.session_state.get("sahi_slice_size", 640)
     if use_sahi:
         sahi_slice_size = st.select_slider(
             "SAHI Tile Size",
             options=[320, 480, 640, 800, 1024],
-            value=640,
+            key="sahi_slice_size",
+            on_change=_knob_touched,
             help="Size of each tile. Smaller = more tiles = catches smaller cracks but slower.",
         )
 
     use_wbf = st.toggle(
         "Weighted Box Fusion (WBF)",
-        value=False,
+        key="use_wbf",
+        on_change=_knob_touched,
         help="Ensemble-only. Averages overlapping boxes from both models weighted by confidence instead of dropping the loser. Typically +1-3 mAP at minimal extra cost.",
     )
 
     # Priority filter
     st.markdown("---")
     st.header("Display Filters")
+    display_style = st.radio(
+        "Result Display",
+        options=["Cluster cards", "Raw boxes", "Both"],
+        index=0,
+        key="display_style",
+        help="Cluster cards group nearby detections into inspector-reviewable regions. Raw boxes shows every individual model detection.",
+    )
     priority_filter = st.multiselect(
         "Show Priority Levels",
         options=["critical", "urgent", "monitor", "routine"],
@@ -584,21 +630,78 @@ if "detection_results" in st.session_state:
         filtered_clusters = [c for c in clusters if _eff_priority(c) in priority_filter]
         hidden_count = len(clusters) - len(filtered_clusters)
 
-        header = f"\U0001f4f7 {item['filename']} — {len(filtered_clusters)} regions"
-        if hidden_count > 0:
-            header += f" ({hidden_count} filtered out)"
+        if display_style == "Raw boxes":
+            header = f"\U0001f4f7 {item['filename']} — {len(dets)} detections"
+        elif display_style == "Both":
+            header = (
+                f"\U0001f4f7 {item['filename']} — {len(filtered_clusters)} regions | "
+                f"{len(dets)} detections"
+            )
+            if hidden_count > 0:
+                header += f" ({hidden_count} regions filtered out)"
+        else:
+            header = f"\U0001f4f7 {item['filename']} — {len(filtered_clusters)} regions"
+            if hidden_count > 0:
+                header += f" ({hidden_count} filtered out)"
 
         with st.expander(header):
             # Cluster outline image (raw boxes are kept for Compare mode).
             # `is not None` check, not `or` — numpy arrays raise on bool().
             clusters_img = item["result"].get("annotated_clusters")
-            annotated = clusters_img if clusters_img is not None else item["result"]["annotated_image"]
-            annotated_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-            st.image(annotated_rgb, width="stretch", output_format="PNG")
+            cluster_annotated = clusters_img if clusters_img is not None else item["result"]["annotated_image"]
+            raw_annotated = item["result"]["annotated_image"]
+
+            if display_style == "Raw boxes":
+                st.image(
+                    cv2.cvtColor(raw_annotated, cv2.COLOR_BGR2RGB),
+                    width="stretch",
+                    output_format="PNG",
+                )
+            elif display_style == "Both":
+                img_col_c, img_col_r = st.columns(2)
+                with img_col_c:
+                    st.markdown("**Cluster regions**")
+                    st.image(
+                        cv2.cvtColor(cluster_annotated, cv2.COLOR_BGR2RGB),
+                        width="stretch",
+                        output_format="PNG",
+                    )
+                with img_col_r:
+                    st.markdown("**Raw detections**")
+                    st.image(
+                        cv2.cvtColor(raw_annotated, cv2.COLOR_BGR2RGB),
+                        width="stretch",
+                        output_format="PNG",
+                    )
+            else:
+                st.image(
+                    cv2.cvtColor(cluster_annotated, cv2.COLOR_BGR2RGB),
+                    width="stretch",
+                    output_format="PNG",
+                )
 
             img_time = item["result"].get("inference_time_ms", 0)
             if img_time > 0:
                 st.caption(f"Inference time: {img_time:.0f}ms")
+
+            if display_style == "Raw boxes":
+                if dets:
+                    raw_rows = [
+                        {
+                            "class": d.get("class_name", ""),
+                            "confidence": f"{d.get('confidence', 0):.0%}",
+                            "severity": d.get("severity", ""),
+                            "priority": d.get("original_safety_priority", d.get("safety_priority", "")),
+                            "width_px": f"{d.get('width_pixels', 0):.0f}",
+                            "models": ", ".join(d.get("models_agreeing", [])),
+                        }
+                        for d in dets
+                    ]
+                    st.dataframe(raw_rows, width="stretch", hide_index=True)
+                    st.caption("Unfiltered raw model output — priority filter applies to cluster cards only.")
+                else:
+                    st.caption("No detections on this image.")
+                continue
 
             if not filtered_clusters:
                 if clusters:
