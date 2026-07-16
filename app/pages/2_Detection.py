@@ -396,7 +396,7 @@ if st.session_state.get("compare_mode"):
                 st.markdown("**Original**")
                 st.image(
                     cv2.cvtColor(r1["original"], cv2.COLOR_BGR2RGB),
-                    use_container_width=True,
+                    width="stretch",
                     output_format="PNG",
                 )
                 st.caption("Photo as uploaded")
@@ -404,7 +404,7 @@ if st.session_state.get("compare_mode"):
                 st.markdown(f"**V1** — {r1['result'].get('inference_time_ms', 0):.0f}ms")
                 st.image(
                     cv2.cvtColor(r1["result"]["annotated_image"], cv2.COLOR_BGR2RGB),
-                    use_container_width=True,
+                    width="stretch",
                     output_format="PNG",
                 )
                 st.caption(f"Mask outlines: {mask_count_v1}/{len(dets_v1)}")
@@ -412,7 +412,7 @@ if st.session_state.get("compare_mode"):
                 st.markdown(f"**V2** — {r2['result'].get('inference_time_ms', 0):.0f}ms")
                 st.image(
                     cv2.cvtColor(r2["result"]["annotated_image"], cv2.COLOR_BGR2RGB),
-                    use_container_width=True,
+                    width="stretch",
                     output_format="PNG",
                 )
                 st.caption(f"Mask outlines: {mask_count_v2}/{len(dets_v2)}")
@@ -547,7 +547,7 @@ if "detection_results" in st.session_state:
                 hole=0.4,
             )])
             fig.update_layout(title="Safety Priority Distribution")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
         with col_class:
             if summary["by_class"]:
@@ -557,7 +557,7 @@ if "detection_results" in st.session_state:
                     marker_color="#FF4B4B",
                 )])
                 fig2.update_layout(title="Detections by Class")
-                st.plotly_chart(fig2, use_container_width=True)
+                st.plotly_chart(fig2, width="stretch")
 
     st.markdown("---")
 
@@ -594,7 +594,7 @@ if "detection_results" in st.session_state:
             clusters_img = item["result"].get("annotated_clusters")
             annotated = clusters_img if clusters_img is not None else item["result"]["annotated_image"]
             annotated_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-            st.image(annotated_rgb, use_container_width=True, output_format="PNG")
+            st.image(annotated_rgb, width="stretch", output_format="PNG")
 
             img_time = item["result"].get("inference_time_ms", 0)
             if img_time > 0:
@@ -661,7 +661,7 @@ if "detection_results" in st.session_state:
                     if bcols[i].button(
                         btn_label,
                         key=f"override_{item['filename']}_{cid}_{level}",
-                        use_container_width=True,
+                        width="stretch",
                     ):
                         if level == suggested:
                             st.session_state["priority_overrides"].pop(key, None)
@@ -685,7 +685,7 @@ if "detection_results" in st.session_state:
                             "models": ", ".join(d.get("models_agreeing", [])),
                         })
                     if rows:
-                        st.dataframe(rows, use_container_width=True, hide_index=True)
+                        st.dataframe(rows, width="stretch", hide_index=True)
 
     st.markdown("---")
     st.info("Head to the **Map** page to see detections on an interactive map.")

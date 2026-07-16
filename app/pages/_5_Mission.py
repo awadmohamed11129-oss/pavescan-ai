@@ -69,12 +69,12 @@ with st.sidebar:
 
     st.markdown("### Route Controls")
 
-    if st.button("Undo Last Point", use_container_width=True):
+    if st.button("Undo Last Point", width="stretch"):
         if st.session_state["mission_waypoints"]:
             st.session_state["mission_waypoints"].pop()
             st.rerun()
 
-    if st.button("Clear All Points", type="secondary", use_container_width=True):
+    if st.button("Clear All Points", type="secondary", width="stretch"):
         st.session_state["mission_waypoints"] = []
         st.session_state["last_click_processed"] = None
         st.rerun()
@@ -222,7 +222,7 @@ if len(waypoints) >= 2:
             data=wp_content,
             file_name="pavescan_mission.waypoints",
             mime="text/plain",
-            use_container_width=True,
+            width="stretch",
             type="primary",
         )
         st.caption(

@@ -59,7 +59,7 @@ if uploaded_files:
             image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
             image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-            st.image(image_rgb, caption=file.name, use_container_width=True, output_format="PNG")
+            st.image(image_rgb, caption=file.name, width="stretch", output_format="PNG")
             st.caption(f"Size: {image.shape[1]}x{image.shape[0]} px")
 
     st.markdown("---")
